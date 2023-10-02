@@ -4,13 +4,19 @@ use tiny_keccak::Sha3;
 
 #[derive(Clone)]
 struct MerkleNode {
+    left: Option<Box<MerkleNode>>,
+    right: Option<Box<MerkleNode>>,
     hash: String,
 }
 
 impl MerkleNode {
     fn new(data: &str) -> Self {
         let hash = hash(data);
-        MerkleNode { hash }
+        MerkleNode {
+            left: None,
+            right: None,
+            hash,
+        }
     }
 
     fn combine(left: MerkleNode, right: MerkleNode) -> Self {
@@ -22,7 +28,11 @@ impl MerkleNode {
         hasher.finalize(&mut combined_hash);
 
         let hash = hex::encode(combined_hash);
-        MerkleNode { hash }
+        MerkleNode {
+            left: Some(Box::new(left)),
+            right: Some(Box::new(right)),
+            hash,
+        }
     }
 }
 
@@ -58,6 +68,61 @@ impl MerkleTree {
     pub fn root_hash(&self) -> &str {
         &self.root.hash
     }
+
+    pub fn generate_proof(&self, data: &str) -> Vec<String> {
+        let mut proof: Vec<String> = Vec::new();
+        let leaf = MerkleNode::new(data);
+        let mut current = &self.root;
+
+        while current.hash != leaf.hash {
+            // Add the sibling's hash to the proof
+            if let Some(left) = &current.left {
+                if left.hash != leaf.hash {
+                    proof.push(left.hash.clone());
+                }
+            }
+            if let Some(right) = &current.right {
+                if right.hash != leaf.hash {
+                    proof.push(right.hash.clone());
+                }
+            }
+
+            if let Some(left) = &current.left {
+                if left.hash == leaf.hash {
+                    current = left;
+                }
+            }
+            if let Some(right) = &current.right {
+                if right.hash == leaf.hash {
+                    current = right;
+                }
+            }
+        }
+
+        proof
+    }
+
+    pub fn verify_proof(&self, data: &str, proof: &[String]) -> bool {
+        let leaf = MerkleNode::new(data);
+        let mut current_hash = leaf.hash.clone();
+
+        for sibling_hash in proof.iter() {
+            let mut hasher = Sha3::v256();
+            let mut combined_hash = [0u8; 32];
+            let mut hash_input = [0u8; 64];
+
+            hex::decode_to_slice(current_hash.as_str(), &mut hash_input[0..32])
+                .expect("Invalid hash");
+            hex::decode_to_slice(sibling_hash, &mut hash_input[32..64]).expect("Invalid hash");
+
+            hasher.update(&hash_input);
+            hasher.finalize(&mut combined_hash);
+
+            current_hash = hex::encode(combined_hash);
+        }
+
+        current_hash == self.root.hash
+    }
 }
 
 fn hash(data: &str) -> String {
@@ -70,7 +135,20 @@ fn hash(data: &str) -> String {
 
 fn main() {
     let data = vec!["rust1", "rust2", "rust3", "rust4"];
-    let merkle_tree = MerkleTree::new(data);
+    let merkle_tree = MerkleTree::new(data.clone());
 
     println!("Root Hash (Keccak-256): {}", merkle_tree.root_hash());
+
+    let data_to_verify = "rust4";
+    let proof = merkle_tree.generate_proof(data_to_verify.clone());
+    let is_verified = merkle_tree.verify_proof(data_to_verify, &proof);
+
+    if is_verified {
+        println!("Data integrity verified for '{}'", data_to_verify);
+    } else {
+        println!(
+            "Data integrity verification failed for '{}'",
+            data_to_verify
+        );
+    }
 }
