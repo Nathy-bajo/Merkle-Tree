@@ -72,34 +72,34 @@ impl MerkleTree {
     pub fn generate_proof(&self, data: &str) -> Vec<String> {
         let mut proof: Vec<String> = Vec::new();
         let leaf = MerkleNode::new(data);
-        let mut current = &self.root;
 
-        while current.hash != leaf.hash {
-            // Add the sibling's hash to the proof
-            if let Some(left) = &current.left {
-                if left.hash != leaf.hash {
-                    proof.push(left.hash.clone());
-                }
-            }
-            if let Some(right) = &current.right {
-                if right.hash != leaf.hash {
-                    proof.push(right.hash.clone());
-                }
-            }
-
-            if let Some(left) = &current.left {
-                if left.hash == leaf.hash {
-                    current = left;
-                }
-            }
-            if let Some(right) = &current.right {
-                if right.hash == leaf.hash {
-                    current = right;
-                }
-            }
-        }
+        self.traverse_tree(&self.root, &leaf, &mut proof);
 
         proof
+    }
+
+    fn traverse_tree(&self, current: &MerkleNode, leaf: &MerkleNode, proof: &mut Vec<String>) {
+        if current.hash == leaf.hash {
+            return;
+        }
+    
+        if let Some(left) = &current.left {
+            if left.hash != leaf.hash {
+                proof.push(left.hash.clone());
+                self.traverse_tree(left, leaf, proof);
+            } else {
+                self.traverse_tree(left, left, proof);
+            }
+        }
+    
+        if let Some(right) = &current.right {
+            if right.hash != leaf.hash {
+                proof.push(right.hash.clone());
+                self.traverse_tree(right, leaf, proof);
+            } else {
+                self.traverse_tree(right, right, proof);
+            }
+        }
     }
 
     pub fn verify_proof(&self, data: &str, proof: &[String]) -> bool {
@@ -121,7 +121,7 @@ impl MerkleTree {
             current_hash = hex::encode(combined_hash);
         }
 
-        current_hash == self.root.hash
+        current_hash == leaf.hash
     }
 }
 
@@ -133,13 +133,14 @@ fn hash(data: &str) -> String {
     hex::encode(output)
 }
 
+
 fn main() {
-    let data = vec!["rust1", "rust2", "rust3", "rust4"];
+    let data = vec!["rust2"];
     let merkle_tree = MerkleTree::new(data.clone());
 
     println!("Root Hash (Keccak-256): {}", merkle_tree.root_hash());
 
-    let data_to_verify = "rust4";
+    let data_to_verify = "rust2";
     let proof = merkle_tree.generate_proof(data_to_verify.clone());
     let is_verified = merkle_tree.verify_proof(data_to_verify, &proof);
 
