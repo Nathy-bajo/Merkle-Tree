@@ -1,155 +1,166 @@
-use hex;
+
 use tiny_keccak::Hasher;
 use tiny_keccak::Sha3;
-
-#[derive(Clone)]
-struct MerkleNode {
+#[derive(Clone, Debug)]
+pub struct MerkleNode {
     left: Option<Box<MerkleNode>>,
     right: Option<Box<MerkleNode>>,
-    hash: String,
+    hash: Vec<u8>,
 }
 
 impl MerkleNode {
-    fn new(data: &str) -> Self {
-        let hash = hash(data);
+    fn new(hash: Vec<u8>) -> Self {
         MerkleNode {
             left: None,
             right: None,
             hash,
         }
     }
-
-    fn combine(left: MerkleNode, right: MerkleNode) -> Self {
-        let mut hasher = Sha3::v256();
-        let mut combined_hash = [0u8; 32];
-
-        hasher.update(left.hash.as_bytes());
-        hasher.update(right.hash.as_bytes());
-        hasher.finalize(&mut combined_hash);
-
-        let hash = hex::encode(combined_hash);
-        MerkleNode {
-            left: Some(Box::new(left)),
-            right: Some(Box::new(right)),
-            hash,
-        }
-    }
 }
 
 pub struct MerkleTree {
-    root: MerkleNode,
+    root: Option<Box<MerkleNode>>,
 }
 
 impl MerkleTree {
-    pub fn new(data: Vec<&str>) -> Self {
-        let leaves: Vec<MerkleNode> = data.iter().map(|d| MerkleNode::new(d)).collect();
-        let root = MerkleTree::build_tree(leaves);
-        MerkleTree { root }
-    }
+    pub fn from_data_blocks(data_blocks: &[&[u8]]) -> Self {
+        let num_blocks = data_blocks.len();
+        let mut leaf_nodes = Vec::with_capacity(num_blocks);
 
-    fn build_tree(mut nodes: Vec<MerkleNode>) -> MerkleNode {
-        if nodes.len() == 1 {
-            return nodes.remove(0);
+        for block in data_blocks {
+            let hash = Self::hash(block);
+            leaf_nodes.push(Box::new(MerkleNode::new(hash)));
         }
-        let mut new_nodes = vec![];
-        for i in (0..nodes.len()).step_by(2) {
-            let left = nodes[i].clone();
-            let right = if i + 1 < nodes.len() {
-                nodes[i + 1].clone()
-            } else {
-                left.clone()
-            };
-            let combined = MerkleNode::combine(left, right);
-            new_nodes.push(combined);
+
+        MerkleTree::build_tree(leaf_nodes)
+    }
+
+    pub fn from_leaf_hashes(leaf_hashes: &[Vec<u8>]) -> Self {
+        let num_leaves = leaf_hashes.len();
+        let mut leaf_nodes = Vec::with_capacity(num_leaves);
+
+        for hash in leaf_hashes.iter() {
+            leaf_nodes.push(Box::new(MerkleNode::new(hash.clone())));
         }
-        MerkleTree::build_tree(new_nodes)
+
+        MerkleTree::build_tree(leaf_nodes)
     }
 
-    pub fn root_hash(&self) -> &str {
-        &self.root.hash
+    fn build_tree(mut nodes: Vec<Box<MerkleNode>>) -> Self {
+        assert!(!nodes.is_empty(), "Cannot build a tree with no nodes");
+
+        while nodes.len() > 1 {
+            let mut parents = Vec::new();
+
+            for chunk in nodes.chunks(2) {
+                let left = chunk[0].clone();
+                let right = if chunk.len() > 1 {
+                    chunk[1].clone()
+                } else {
+                    left.clone() 
+                };
+                let combined_hash = Self::combine_hashes(&left.hash, &right.hash);
+                let mut parent = Box::new(MerkleNode::new(combined_hash));
+                parent.left = Some(left);
+                parent.right = Some(right);
+                parents.push(parent);
+            }
+
+            nodes = parents;
+        }
+
+        MerkleTree {
+            root: Some(nodes.remove(0)),
+        }
     }
 
-    pub fn generate_proof(&self, data: &str) -> Vec<String> {
-        let mut proof: Vec<String> = Vec::new();
-        let leaf = MerkleNode::new(data);
-
-        self.traverse_tree(&self.root, &leaf, &mut proof);
-
-        proof
+    pub fn root_hex(&self) -> String {
+        match &self.root {
+            Some(root_node) => hex::encode(&root_node.hash),
+            None => "".to_string(),
+        }
     }
 
-    fn traverse_tree(&self, current: &MerkleNode, leaf: &MerkleNode, proof: &mut Vec<String>) {
-        if current.hash == leaf.hash {
+    pub fn verify_integrity(&self, data: &[u8]) -> bool {
+        match &self.root {
+            Some(root_node) => {
+                let root_hash = &root_node.hash;
+                let data_hash = Self::hash(data);
+                root_hash == &data_hash
+            }
+            None => false,
+        }
+    }
+
+    /// Generates a cryptographic proof for the provided data
+    pub fn generate_proof(&self, data: &[u8]) -> Option<Vec<Vec<u8>>> {
+        match &self.root {
+            Some(root_node) => {
+                let target_hash = Self::hash(data);
+                let mut proof = Vec::new();
+
+                Self::search_node(&target_hash, root_node, &mut proof);
+                if proof.is_empty() {
+                    None
+                } else {
+                    Some(proof)
+                }
+            }
+            None => None,
+        }
+    }
+
+    fn search_node(target_hash: &[u8], node: &MerkleNode, proof: &mut Vec<Vec<u8>>) {
+        if node.hash == *target_hash {
             return;
         }
     
-        if let Some(left) = &current.left {
-            if left.hash != leaf.hash {
-                proof.push(left.hash.clone());
-                self.traverse_tree(left, leaf, proof);
+        if let Some(left) = &node.left {
+            if &left.hash == target_hash {
+                proof.push(node.right.as_ref().unwrap().hash.clone());
+                Self::search_node(target_hash, &*left, proof);
             } else {
-                self.traverse_tree(left, left, proof);
-            }
-        }
-    
-        if let Some(right) = &current.right {
-            if right.hash != leaf.hash {
-                proof.push(right.hash.clone());
-                self.traverse_tree(right, leaf, proof);
-            } else {
-                self.traverse_tree(right, right, proof);
+                Self::search_node(target_hash, &*left, proof);
+                if let Some(right) = &node.right {
+                    proof.push(right.hash.clone());
+                }
             }
         }
     }
 
-    pub fn verify_proof(&self, data: &str, proof: &[String]) -> bool {
-        let leaf = MerkleNode::new(data);
-        let mut current_hash = leaf.hash.clone();
+    fn hash(data: &[u8]) -> Vec<u8> {
+        let mut hasher = Sha3::v256();
+        hasher.update(data);
+        let mut output = [0u8; 32];
+        hasher.finalize(&mut output);
+        output.to_vec()
+    }
 
-        for sibling_hash in proof.iter() {
-            let mut hasher = Sha3::v256();
-            let mut combined_hash = [0u8; 32];
-            let mut hash_input = [0u8; 64];
-
-            hex::decode_to_slice(current_hash.as_str(), &mut hash_input[0..32])
-                .expect("Invalid hash");
-            hex::decode_to_slice(sibling_hash, &mut hash_input[32..64]).expect("Invalid hash");
-
-            hasher.update(&hash_input);
-            hasher.finalize(&mut combined_hash);
-
-            current_hash = hex::encode(combined_hash);
-        }
-
-        current_hash == leaf.hash
+    fn combine_hashes(left: &[u8], right: &[u8]) -> Vec<u8> {
+        let mut combined_data = Vec::new();
+        combined_data.extend_from_slice(left);
+        combined_data.extend_from_slice(right);
+        Self::hash(&combined_data)
     }
 }
-
-fn hash(data: &str) -> String {
-    let mut hasher = Sha3::v256();
-    let mut output = [0u8; 32];
-    hasher.update(data.as_bytes());
-    hasher.finalize(&mut output);
-    hex::encode(output)
-}
-
 
 fn main() {
-    let data = vec!["rust2"];
-    let merkle_tree = MerkleTree::new(data.clone());
+    let data = vec![0, 1, 2, 3, 4, 5];
+    
+    let merkle_tree = MerkleTree::from_data_blocks(&[&data]);
 
-    println!("Root Hash (Keccak-256): {}", merkle_tree.root_hash());
+    println!("Root Hash (Keccack-256): {}", merkle_tree.root_hex());
 
-    let data_to_verify = "rust2";
-    let proof = merkle_tree.generate_proof(data_to_verify.clone());
-    let is_verified = merkle_tree.verify_proof(data_to_verify, &proof);
+    let is_integrity_verified = merkle_tree.verify_integrity(&data);
+    println!("Data integrity verified: {}", is_integrity_verified);
 
-    if is_verified {
-        println!("Data integrity verified for '{}'", data_to_verify);
+    let proof = merkle_tree.generate_proof(&data);
+    if let Some(proof) = proof {
+        println!("Cryptographic Proof:");
+        for (index, hash) in proof.iter().enumerate() {
+            println!("Proof {}: {}", index + 1, hex::encode(&hash));
+        }
     } else {
-        println!(
-            "Data integrity verification failed for '{}'",
-            data_to_verify
-        );
+        println!("Failed to generate a cryptographic proof.");
     }
 }
